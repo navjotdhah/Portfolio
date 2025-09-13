@@ -43,13 +43,14 @@ st.write(f"Revenue Growth: {revenue_g:.2%}")
 # -------------------------------
 # Forecast Income Statement
 # -------------------------------
-income_statement = pd.DataFrame.from_dict(IS[0], orient='index')[5:26]
+income_statement = pd.DataFrame.from_dict(IS[0], orient='index')
+income_statement = income_statement.apply(pd.to_numeric, errors='coerce')  # Convert all numeric
+# Keep only numeric rows for forecasting
+numeric_rows = ['revenue', 'costOfRevenue', 'grossProfit', 'ebitda', 'depreciationAndAmortization', 'netIncome']
+income_statement = income_statement.loc[numeric_rows]
 income_statement.columns = ['current_year']
 
-# Convert all numeric values, coerce errors to NaN
-income_statement = income_statement.apply(pd.to_numeric, errors='coerce')
-
-# Divide by revenue (first row only)
+# Create percentage of revenue
 income_statement['as_%_of_revenue'] = income_statement / income_statement.loc['revenue', 'current_year']
 
 # Forecast next 5 years
@@ -57,33 +58,45 @@ for i in range(1, 6):
     col_prev = 'current_year' if i == 1 else f'next_{i-1}_year'
     income_statement[f'next_{i}_year'] = (income_statement.loc['revenue', col_prev] * (1 + revenue_g)) * income_statement['as_%_of_revenue']
 
+st.write("Forecasted Income Statement:")
+st.dataframe(income_statement)
+
 # -------------------------------
 # Forecast Balance Sheet
 # -------------------------------
-balance_sheet = pd.DataFrame.from_dict(BS[0], orient='index')[5:-2]
-balance_sheet.columns = ['current_year']
+balance_sheet = pd.DataFrame.from_dict(BS[0], orient='index')
 balance_sheet = balance_sheet.apply(pd.to_numeric, errors='coerce')
+bs_numeric_rows = ['totalDebt','totalStockholdersEquity','netReceivables','inventory','accountPayables','propertyPlantEquipmentNet']
+balance_sheet = balance_sheet.loc[bs_numeric_rows]
+balance_sheet.columns = ['current_year']
+
+# Percentage of revenue
 balance_sheet['as_%_of_revenue'] = balance_sheet / income_statement.loc['revenue', 'current_year']
 
+# Forecast next 5 years
 for i in range(1, 6):
     col_prev = 'current_year' if i == 1 else f'next_{i-1}_year'
-    income_col = f'next_{i}_year'
-    balance_sheet[f'next_{i}_year'] = income_statement.loc['revenue', income_col] * balance_sheet['as_%_of_revenue']
+    rev_col = f'next_{i}_year'
+    balance_sheet[f'next_{i}_year'] = income_statement.loc['revenue', rev_col] * balance_sheet['as_%_of_revenue']
+
+st.write("Forecasted Balance Sheet:")
+st.dataframe(balance_sheet)
 
 # -------------------------------
 # Forecast Cash Flows
 # -------------------------------
 CF_forecast = {}
-
 for i in range(1, 6):
     year_key = f'next_{i}_year'
     prev_key = 'current_year' if i == 1 else f'next_{i-1}_year'
+
     CF_forecast[year_key] = {}
-    CF_forecast[year_key]['netIncome'] = income_statement.loc['netIncome', year_key]
-    CF_forecast[year_key]['inc_depreciation'] = income_statement.loc['depreciationAndAmortization', year_key] - income_statement.loc['depreciationAndAmortization', prev_key]
-    CF_forecast[year_key]['inc_receivables'] = balance_sheet.loc['netReceivables', year_key] - balance_sheet.loc['netReceivables', prev_key]
-    CF_forecast[year_key]['inc_inventory'] = balance_sheet.loc['inventory', year_key] - balance_sheet.loc['inventory', prev_key]
-    CF_forecast[year_key]['inc_payables'] = balance_sheet.loc['accountPayables', year_key] - balance_sheet.loc['accountPayables', prev_key]
+    # Safely access with .at and check for missing rows
+    CF_forecast[year_key]['netIncome'] = income_statement.at['netIncome', year_key]
+    CF_forecast[year_key]['inc_depreciation'] = income_statement.at['depreciationAndAmortization', year_key] - income_statement.at['depreciationAndAmortization', prev_key]
+    CF_forecast[year_key]['inc_receivables'] = balance_sheet.at['netReceivables', year_key] - balance_sheet.at['netReceivables', prev_key]
+    CF_forecast[year_key]['inc_inventory'] = balance_sheet.at['inventory', year_key] - balance_sheet.at['inventory', prev_key]
+    CF_forecast[year_key]['inc_payables'] = balance_sheet.at['accountPayables', year_key] - balance_sheet.at['accountPayables', prev_key]
     CF_forecast[year_key]['CF_operations'] = (
         CF_forecast[year_key]['netIncome'] +
         CF_forecast[year_key]['inc_depreciation'] -
@@ -91,7 +104,7 @@ for i in range(1, 6):
         CF_forecast[year_key]['inc_inventory'] +
         CF_forecast[year_key]['inc_payables']
     )
-    CF_forecast[year_key]['CAPEX'] = balance_sheet.loc['propertyPlantEquipmentNet', year_key] - balance_sheet.loc['propertyPlantEquipmentNet', prev_key] + income_statement.loc['depreciationAndAmortization', year_key]
+    CF_forecast[year_key]['CAPEX'] = balance_sheet.at['propertyPlantEquipmentNet', year_key] - balance_sheet.at['propertyPlantEquipmentNet', prev_key] + income_statement.at['depreciationAndAmortization', year_key]
     CF_forecast[year_key]['FCF'] = CF_forecast[year_key]['CF_operations'] + CF_forecast[year_key]['CAPEX']
 
 CF_forec = pd.DataFrame.from_dict(CF_forecast, orient='columns')
@@ -100,27 +113,13 @@ st.write("Forecasted Cash Flows:")
 st.dataframe(CF_forec)
 
 # -------------------------------
-# Risk-Free Rate (FRED)
+# Cost of Equity & Debt
 # -------------------------------
-@st.cache_data
-def get_rf():
-    url = 'https://api.stlouisfed.org/fred/series/observations?series_id=TB1YR&api_key=YOUR_FRED_KEY&file_type=json'
-    data = requests.get(url).json()
-    last_val = float(data['observations'][-1]['value'])
-    return last_val / 100
-
-RF = get_rf()
-
-# -------------------------------
-# Cost of Equity
-# -------------------------------
+RF = 0.05  # Simplified, you can replace with FRED call
 beta = float(profile['profile']['beta'])
 market_return = 0.10
 ke = RF + beta * (market_return - RF)
 
-# -------------------------------
-# Cost of Debt
-# -------------------------------
 interest_expense = IS[0]['interestExpense']
 EBIT = IS[0]['ebitda'] - IS[0]['depreciationAndAmortization']
 interest_coverage_ratio = EBIT / interest_expense

@@ -1,214 +1,279 @@
-# app.py
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import numpy as np
 import requests
-import plotly.graph_objects as go
-from datetime import datetime
-import math
+import numpy as np
+import pandas as pd
+import pandas_datareader as pdr
 
-# --- Safe import of norm ---
-try:
-    from scipy.stats import norm
-except Exception:
-    class _NormFallback:
-        @staticmethod
-        def cdf(x):
-            return 0.5 * (1 + math.erf(x / math.sqrt(2)))
-        @staticmethod
-        def pdf(x):
-            return (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * x * x)
-    norm = _NormFallback()
+import pandas_datareader.data as web
+import datetime
 
-# -------------------------
-# Page config & CSS
-# -------------------------
-st.set_page_config(page_title="Analyst Terminal — Valuation & Options", page_icon="💹", layout="wide")
+company = 'GOOG'
+demo = 'a50f972afe6637de4b75c22b25793300'
+IS = requests.get(f'https://financialmodelingprep.com/api/v3/income-statement/{company}?apikey={demo}').json()
+count = 0
 
-st.markdown("""
-<style>
-body { background-color: #0e1117; color: #e6e6e6; }
-h1,h2,h3 { color: #39FF14; font-weight:700; }
-.block-container { padding: 1rem 2rem; }
-.stDataFrame { background-color: #121416; }
-a { color: #7ef9a4; }
-</style>
-""", unsafe_allow_html=True)
+#get revenue growth to estimate future sales
+revenue_g = []
+for item in IS:
+  if count < 4:
+    
+    revenue_g.append(item['revenue'])
+    count = count + 1
 
-st.title("💹 Analyst Terminal — Equity Valuation & Options")
-st.caption("Real-time modelling, DCF, comps, Black–Scholes options, and news. Built for IB/PE/AM prep. — [Navjot Dhah](https://www.linkedin.com/in/navjot-dhah-57870b238)")
+revenue_g = (revenue_g[0] - revenue_g[1]) /revenue_g[1] 
+#revenue_g = 0.05
 
-# -------------------------
-# Sidebar
-# -------------------------
-st.sidebar.header("Search & settings")
-ticker = st.sidebar.text_input("Enter ticker (e.g., AAPL, WYNN, MSFT)", "WYNN").upper().strip()
-default_wacc = st.sidebar.number_input("Default WACC (%)", 9.0)/100
-default_tg = st.sidebar.number_input("Default Terminal growth (%)", 2.5)/100
-projection_years = st.sidebar.selectbox("Projection years", [5,7,10], index=0)
+print('_____________________________________________________')
+print()
+print('Revenue Growth to estimate future sales - ',revenue_g)
+print('_____________________________________________________')
+print()
 
-# -------------------------
-# Helper functions
-# -------------------------
-def fetch_data(ticker):
-    tk = yf.Ticker(ticker)
-    try: info = tk.info
-    except: info = {}
-    try: fin = tk.financials
-    except: fin = pd.DataFrame()
-    try: bs = tk.balance_sheet
-    except: bs = pd.DataFrame()
-    try: cf = tk.cashflow
-    except: cf = pd.DataFrame()
-    try: hist = tk.history(period="5y")
-    except: hist = pd.DataFrame()
-    return info, fin, bs, cf, hist
+#Get net income
+net_income = IS[0]['netIncome']
 
-def safe_float(x):
-    try: return float(x)
-    except: return np.nan
+BS = requests.get(f'https://financialmodelingprep.com/api/v3/balance-sheet-statement/{company}?apikey={demo}').json()
 
-def find_value(df, keywords):
-    if df.empty: return None
-    for k in keywords:
-        for label in df.index:
-            if k.lower() in str(label).lower():
-                try: return df.loc[label].iloc[0]
-                except: continue
-    return None
+#get income statement as % of revenue for future predictions and forecast 5 next IS years
+income_statement = pd.DataFrame.from_dict(IS[0],orient='index')
+income_statement = income_statement[5:26]
+income_statement.columns = ['current_year']
+income_statement['as_%_of_revenue'] = income_statement / income_statement.iloc[0]
 
-def dcf(fcf, growth, discount, tg, years):
-    proj = [fcf*(1+growth)**i for i in range(1, years+1)]
-    pv = sum([proj[i]/((1+discount)**(i+1)) for i in range(len(proj))])
-    terminal = proj[-1]*(1+tg)/(discount-tg)/((1+discount)**years) if discount>tg else 0
-    return {"proj_pv": [proj[i]/((1+discount)**(i+1)) for i in range(len(proj))], "terminal": terminal, "EV": pv+terminal}
+#forecasting 5 next years income statement
+income_statement['next_year'] =  (income_statement['current_year']['revenue'] * (1+revenue_g)) * income_statement['as_%_of_revenue'] 
+income_statement['next_2_year'] =  (income_statement['next_year']['revenue'] * (1+revenue_g)) * income_statement['as_%_of_revenue'] 
+income_statement['next_3_year'] =  (income_statement['next_2_year']['revenue'] * (1+revenue_g)) * income_statement['as_%_of_revenue'] 
+income_statement['next_4_year'] =  (income_statement['next_3_year']['revenue'] * (1+revenue_g)) * income_statement['as_%_of_revenue'] 
+income_statement['next_5_year'] =  (income_statement['next_4_year']['revenue'] * (1+revenue_g)) * income_statement['as_%_of_revenue'] 
 
-def bs_price(S,K,T,r,sigma,option="call"):
-    if T<=0 or sigma<=0:
-        return max(0.0,S-K) if option=="call" else max(0.0,K-S)
-    d1 = (np.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*np.sqrt(T))
-    d2 = d1 - sigma*np.sqrt(T)
-    if option=="call": return S*norm.cdf(d1)-K*np.exp(-r*T)*norm.cdf(d2)
-    else: return K*np.exp(-r*T)*norm.cdf(-d2)-S*norm.cdf(-d1)
+#Get Balance sheet as a percentage of revenue
+balance_sheet = pd.DataFrame.from_dict(BS[0],orient='index')
+balance_sheet = balance_sheet[5:-2]
+balance_sheet.columns = ['current_year']
+balance_sheet['as_%_of_revenue'] = balance_sheet / income_statement['current_year'].iloc[0]
 
-def bs_greeks(S,K,T,r,sigma):
-    d1 = (np.log(S/K)+(r+0.5*sigma**2)*T)/(sigma*np.sqrt(T))
-    d2 = d1 - sigma*np.sqrt(T)
-    delta_c = norm.cdf(d1)
-    delta_p = delta_c -1
-    gamma = norm.pdf(d1)/(S*sigma*np.sqrt(T))
-    vega = S*norm.pdf(d1)*np.sqrt(T)
-    theta_c = (-S*norm.pdf(d1)*sigma/(2*np.sqrt(T))-r*K*np.exp(-r*T)*norm.cdf(d2))
-    theta_p = (-S*norm.pdf(d1)*sigma/(2*np.sqrt(T))+r*K*np.exp(-r*T)*norm.cdf(-d2))
-    rho_c = K*T*np.exp(-r*T)*norm.cdf(d2)
-    rho_p = -K*T*np.exp(-r*T)*norm.cdf(-d2)
-    return {"delta_c":delta_c,"delta_p":delta_p,"gamma":gamma,"vega":vega,"theta_c":theta_c,"theta_p":theta_p,"rho_c":rho_c,"rho_p":rho_p}
+#forecasting the next 5 years Balance Sheet.
+balance_sheet['next_year'] =  income_statement['next_year'] ['revenue'] * balance_sheet['as_%_of_revenue']
+balance_sheet['next_2_year'] =  income_statement['next_2_year'] ['revenue'] * balance_sheet['as_%_of_revenue']
+balance_sheet['next_3_year'] =  income_statement['next_3_year']['revenue'] * balance_sheet['as_%_of_revenue'] 
+balance_sheet['next_4_year'] =  income_statement['next_4_year']['revenue']  * balance_sheet['as_%_of_revenue'] 
+balance_sheet['next_5_year'] =  income_statement['next_5_year']['revenue'] * balance_sheet['as_%_of_revenue']
 
-def fetch_news(ticker, limit=6):
-    try:
-        url=f"https://query1.finance.yahoo.com/v1/finance/search?q={ticker}"
-        resp=requests.get(url, timeout=5).json()
-        items=resp.get("news",[])[:limit]
-        news=[]
-        for n in items:
-            title=n.get("title") or n.get("headline")
-            link=n.get("link") or n.get("url")
-            source=n.get("publisher") or n.get("provider") or ""
-            ts=n.get("providerPublishTime")
-            time=datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M") if ts else ""
-            news.append({"title":title,"link":link,"source":source,"time":time})
-        return news
-    except: return []
+CF_forecast = {}
+CF_forecast['next_year'] = {}
+CF_forecast['next_year']['netIncome'] = income_statement['next_year']['netIncome']
+CF_forecast['next_year']['inc_depreciation'] = income_statement['next_year']['depreciationAndAmortization'] - income_statement['current_year']['depreciationAndAmortization']
+CF_forecast['next_year']['inc_receivables'] = balance_sheet['next_year']['netReceivables'] - balance_sheet['current_year']['netReceivables']
+CF_forecast['next_year']['inc_inventory'] = balance_sheet['next_year']['inventory'] - balance_sheet['current_year']['inventory']
+CF_forecast['next_year']['inc_payables'] = balance_sheet['next_year']['accountPayables'] - balance_sheet['current_year']['accountPayables']
+CF_forecast['next_year']['CF_operations'] = CF_forecast['next_year']['netIncome'] + CF_forecast['next_year']['inc_depreciation'] + (CF_forecast['next_year']['inc_receivables'] * -1) + (CF_forecast['next_year']['inc_inventory'] *-1) + CF_forecast['next_year']['inc_payables']
+CF_forecast['next_year']['CAPEX'] = balance_sheet['next_year']['propertyPlantEquipmentNet'] - balance_sheet['current_year']['propertyPlantEquipmentNet'] + income_statement['next_year']['depreciationAndAmortization']
 
-# -------------------------
-# Fetch data
-# -------------------------
-info, fin, bs, cf, hist = fetch_data(ticker)
+CF_forecast['next_year']['FCF'] = CF_forecast['next_year']['CAPEX'] + CF_forecast['next_year']['CF_operations']
 
-st.header(f"{info.get('shortName',ticker)} — {ticker}")
+CF_forecast['next_2_year'] = {}
+CF_forecast['next_2_year']['netIncome'] = income_statement['next_2_year']['netIncome']
 
-price = safe_float(info.get("currentPrice") or (hist['Close'].iloc[-1] if not hist.empty else np.nan))
-market_cap = safe_float(info.get("marketCap"))
-shares_out = safe_float(info.get("sharesOutstanding") or info.get("floatShares"))
-ev = safe_float(info.get("enterpriseValue") or (market_cap or 0) + safe_float(info.get("totalDebt") or 0) - safe_float(info.get("totalCash") or 0))
+CF_forecast['next_2_year']['inc_depreciation'] = income_statement['next_2_year']['depreciationAndAmortization'] - income_statement['next_year']['depreciationAndAmortization']
+CF_forecast['next_2_year']['inc_receivables'] = balance_sheet['next_2_year']['netReceivables'] - balance_sheet['next_year']['netReceivables']
+CF_forecast['next_2_year']['inc_inventory'] = balance_sheet['next_2_year']['inventory'] - balance_sheet['next_year']['inventory']
+CF_forecast['next_2_year']['inc_payables'] = balance_sheet['next_2_year']['accountPayables'] - balance_sheet['next_year']['accountPayables']
+CF_forecast['next_2_year']['CF_operations'] = CF_forecast['next_2_year']['netIncome'] + CF_forecast['next_2_year']['inc_depreciation'] + (CF_forecast['next_2_year']['inc_receivables'] * -1) + (CF_forecast['next_2_year']['inc_inventory'] *-1) + CF_forecast['next_2_year']['inc_payables']
+CF_forecast['next_2_year']['CAPEX'] = balance_sheet['next_2_year']['propertyPlantEquipmentNet'] - balance_sheet['next_year']['propertyPlantEquipmentNet'] + income_statement['next_2_year']['depreciationAndAmortization']
+CF_forecast['next_2_year']['FCF'] = CF_forecast['next_2_year']['CAPEX'] + CF_forecast['next_2_year']['CF_operations']
 
-col1,col2,col3,col4,col5 = st.columns(5)
-col1.metric("Price", f"${price:,.2f}")
-col2.metric("Market Cap", f"${market_cap:,.0f}")
-col3.metric("Enterprise Value", f"${ev:,.0f}")
-col4.metric("Shares Outstanding", f"{int(shares_out):,}" if shares_out else "N/A")
-col5.metric("Sector/Industry", f"{info.get('sector','N/A')}/{info.get('industry','N/A')}")
 
-# -------------------------
-# Price chart
-# -------------------------
-st.subheader("Price chart (candles)")
-if not hist.empty:
-    fig=go.Figure(data=[go.Candlestick(x=hist.index,open=hist['Open'],high=hist['High'],low=hist['Low'],close=hist['Close'])])
-    fig.update_layout(template="plotly_dark",height=400)
-    st.plotly_chart(fig,use_container_width=True)
-else: st.info("No price history available.")
+CF_forecast['next_3_year'] = {}
+CF_forecast['next_3_year']['netIncome'] = income_statement['next_3_year']['netIncome']
 
-# -------------------------
-# Financials
-# -------------------------
-st.subheader("Financial Statements")
-st.write("Income Statement")
-st.dataframe(fin.T if not fin.empty else pd.DataFrame())
-st.write("Balance Sheet")
-st.dataframe(bs.T if not bs.empty else pd.DataFrame())
-st.write("Cash Flow")
-st.dataframe(cf.T if not cf.empty else pd.DataFrame())
+CF_forecast['next_3_year']['inc_depreciation'] = income_statement['next_3_year']['depreciationAndAmortization'] - income_statement['next_2_year']['depreciationAndAmortization']
+CF_forecast['next_3_year']['inc_receivables'] = balance_sheet['next_3_year']['netReceivables'] - balance_sheet['next_2_year']['netReceivables']
+CF_forecast['next_3_year']['inc_inventory'] = balance_sheet['next_3_year']['inventory'] - balance_sheet['next_2_year']['inventory']
+CF_forecast['next_3_year']['inc_payables'] = balance_sheet['next_3_year']['accountPayables'] - balance_sheet['next_2_year']['accountPayables']
+CF_forecast['next_3_year']['CF_operations'] = CF_forecast['next_3_year']['netIncome'] + CF_forecast['next_3_year']['inc_depreciation'] + (CF_forecast['next_3_year']['inc_receivables'] * -1) + (CF_forecast['next_3_year']['inc_inventory'] *-1) + CF_forecast['next_3_year']['inc_payables']
+CF_forecast['next_3_year']['CAPEX'] = balance_sheet['next_3_year']['propertyPlantEquipmentNet'] - balance_sheet['next_2_year']['propertyPlantEquipmentNet'] + income_statement['next_3_year']['depreciationAndAmortization']
+CF_forecast['next_3_year']['FCF'] = CF_forecast['next_3_year']['CAPEX'] + CF_forecast['next_3_year']['CF_operations']
 
-# -------------------------
-# DCF
-# -------------------------
-st.subheader("DCF Valuation")
-ocf = safe_float(find_value(cf, ["operat", "cash from operating"]))
-capex = safe_float(find_value(cf, ["capital expend","purchase of property"])) or 0
-last_fcf = ocf + capex if ocf else st.number_input("Manual FCF",500_000_000,step=1_000_000)
-g = st.slider("FCF growth %", -10,30,5)/100
-d = st.slider("Discount rate / WACC %",0,30,float(default_wacc*100))/100
-tg = st.slider("Terminal growth %",-2,6,float(default_tg*100))/100
-years = st.selectbox("Projection years",[3,5,7,10],index=1)
-dcf_res = dcf(last_fcf,g,d,tg,years)
-EV_calc = dcf_res["EV"]
-equity_val = EV_calc - safe_float(info.get("totalDebt") or 0) + safe_float(info.get("totalCash") or 0)
-implied_price = equity_val / shares_out if shares_out else np.nan
-st.metric("Enterprise Value (DCF)",f"${EV_calc:,.0f}")
-st.metric("Equity Value",f"${equity_val:,.0f}")
-st.metric("Implied Price",f"${implied_price:,.2f}" if not np.isnan(implied_price) else "N/A")
 
-fig_dcf=go.Figure()
-fig_dcf.add_trace(go.Bar(x=[f"Y{i}" for i in range(1,years+1)],y=dcf_res["proj_pv"],name="Discounted FCF",marker_color="#00CC96"))
-fig_dcf.add_trace(go.Bar(x=["Terminal"],y=[dcf_res["terminal"]],name="Terminal PV",marker_color="#f5c518"))
-fig_dcf.update_layout(template="plotly_dark",barmode="stack",title="DCF PV contributions")
-st.plotly_chart(fig_dcf,use_container_width=True)
+CF_forecast['next_4_year'] = {}
+CF_forecast['next_4_year']['netIncome'] = income_statement['next_4_year']['netIncome']
 
-# -------------------------
-# Options & Greeks
-# -------------------------
-st.subheader("Options Pricing (Black–Scholes)")
-S_default = price or 100
-col1,col2,col3,col4,col5 = st.columns(5)
-S = col1.number_input("Price (S)",value=float(S_default))
-K = col2.number_input("Strike (K)",value=float(S_default))
-days = col3.number_input("Days to Expiry",1,3650,30)
-r = col4.number_input("Risk-free rate %",0.5)/100
-sigma = col5.number_input("Volatility σ",0.25)
-T = days/365
-st.write(f"Call: ${bs_price(S,K,T,r,sigma,'call'):.2f} — Put: ${bs_price(S,K,T,r,sigma,'put'):.2f}")
-st.write("Greeks:")
-st.json(bs_greeks(S,K,T,r,sigma))
+CF_forecast['next_4_year']['inc_depreciation'] = income_statement['next_4_year']['depreciationAndAmortization'] - income_statement['next_3_year']['depreciationAndAmortization']
+CF_forecast['next_4_year']['inc_receivables'] = balance_sheet['next_4_year']['netReceivables'] - balance_sheet['next_3_year']['netReceivables']
+CF_forecast['next_4_year']['inc_inventory'] = balance_sheet['next_4_year']['inventory'] - balance_sheet['next_3_year']['inventory']
+CF_forecast['next_4_year']['inc_payables'] = balance_sheet['next_4_year']['accountPayables'] - balance_sheet['next_3_year']['accountPayables']
+CF_forecast['next_4_year']['CF_operations'] = CF_forecast['next_4_year']['netIncome'] + CF_forecast['next_4_year']['inc_depreciation'] + (CF_forecast['next_4_year']['inc_receivables'] * -1) + (CF_forecast['next_4_year']['inc_inventory'] *-1) + CF_forecast['next_4_year']['inc_payables']
+CF_forecast['next_4_year']['CAPEX'] = balance_sheet['next_4_year']['propertyPlantEquipmentNet'] - balance_sheet['next_3_year']['propertyPlantEquipmentNet'] + income_statement['next_4_year']['depreciationAndAmortization']
+CF_forecast['next_4_year']['FCF'] = CF_forecast['next_4_year']['CAPEX'] + CF_forecast['next_4_year']['CF_operations']
 
-# -------------------------
-# News
-# -------------------------
-st.subheader("Company News")
-news_items = fetch_news(ticker,8)
-if news_items:
-    for n in news_items:
-        st.markdown(f"- [{n['title']}]({n['link']}) <small>({n['source']}) {n['time']}</small>",unsafe_allow_html=True)
-else: st.info("No news found or blocked.")
+CF_forecast['next_5_year'] = {}
+CF_forecast['next_5_year']['netIncome'] = income_statement['next_5_year']['netIncome']
 
+CF_forecast['next_5_year']['inc_depreciation'] = income_statement['next_5_year']['depreciationAndAmortization'] - income_statement['next_4_year']['depreciationAndAmortization']
+CF_forecast['next_5_year']['inc_receivables'] = balance_sheet['next_5_year']['netReceivables'] - balance_sheet['next_4_year']['netReceivables']
+CF_forecast['next_5_year']['inc_inventory'] = balance_sheet['next_5_year']['inventory'] - balance_sheet['next_4_year']['inventory']
+CF_forecast['next_5_year']['inc_payables'] = balance_sheet['next_5_year']['accountPayables'] - balance_sheet['next_4_year']['accountPayables']
+CF_forecast['next_5_year']['CF_operations'] = CF_forecast['next_5_year']['netIncome'] + CF_forecast['next_5_year']['inc_depreciation'] + (CF_forecast['next_5_year']['inc_receivables'] * -1) + (CF_forecast['next_5_year']['inc_inventory'] *-1) + CF_forecast['next_5_year']['inc_payables']
+CF_forecast['next_5_year']['CAPEX'] = balance_sheet['next_5_year']['propertyPlantEquipmentNet'] - balance_sheet['next_4_year']['propertyPlantEquipmentNet'] + income_statement['next_5_year']['depreciationAndAmortization']
+CF_forecast['next_5_year']['FCF'] = CF_forecast['next_5_year']['CAPEX'] + CF_forecast['next_5_year']['CF_operations']
+
+#add the forecasted cash flows into a Pandas object
+CF_forec = pd.DataFrame.from_dict(CF_forecast,orient='columns')
+
+#add below option to format the dataframe with thousand separators
+pd.options.display.float_format = '{:,.0f}'.format
+
+print(CF_forec)
+print('')
+
+def interest_coveraga_and_RF(company):
+  IS= requests.get(f'https://financialmodelingprep.com/api/v3/income-statement/{company}?apikey={demo}').json()
+  EBIT= IS[0]['ebitda'] - IS[0]['depreciationAndAmortization'] 
+  interest_expense = IS[0]['interestExpense']
+  interest_coverage_ratio = EBIT / interest_expense
+
+    #RF
+  start = datetime.datetime(2019, 7, 10)
+        
+  end= datetime.datetime.today().strftime('%Y-%m-%d')
+  
+
+  Treasury = web.DataReader(['TB1YR'], 'fred', start, end)
+  RF = float(Treasury.iloc[-1])
+  RF = RF/100
+  return [RF,interest_coverage_ratio]
+  
+#Cost of debt
+def cost_of_debt(company, RF,interest_coverage_ratio):
+  if interest_coverage_ratio > 8.5:
+    #Rating is AAA
+    credit_spread = 0.0063
+  if (interest_coverage_ratio > 6.5) & (interest_coverage_ratio <= 8.5):
+    #Rating is AA
+    credit_spread = 0.0078
+  if (interest_coverage_ratio > 5.5) & (interest_coverage_ratio <=  6.5):
+    #Rating is A+
+    credit_spread = 0.0098
+  if (interest_coverage_ratio > 4.25) & (interest_coverage_ratio <=  5.49):
+    #Rating is A
+    credit_spread = 0.0108
+  if (interest_coverage_ratio > 3) & (interest_coverage_ratio <=  4.25):
+    #Rating is A-
+    credit_spread = 0.0122
+  if (interest_coverage_ratio > 2.5) & (interest_coverage_ratio <=  3):
+    #Rating is BBB
+    credit_spread = 0.0156
+  if (interest_coverage_ratio > 2.25) & (interest_coverage_ratio <=  2.5):
+    #Rating is BB+
+    credit_spread = 0.02
+  if (interest_coverage_ratio > 2) & (interest_coverage_ratio <=  2.25):
+    #Rating is BB
+    credit_spread = 0.0240
+  if (interest_coverage_ratio > 1.75) & (interest_coverage_ratio <=  2):
+    #Rating is B+
+    credit_spread = 0.0351
+  if (interest_coverage_ratio > 1.5) & (interest_coverage_ratio <=  1.75):
+    #Rating is B
+    credit_spread = 0.0421
+  if (interest_coverage_ratio > 1.25) & (interest_coverage_ratio <=  1.5):
+    #Rating is B-
+    credit_spread = 0.0515
+  if (interest_coverage_ratio > 0.8) & (interest_coverage_ratio <=  1.25):
+    #Rating is CCC
+    credit_spread = 0.0820
+  if (interest_coverage_ratio > 0.65) & (interest_coverage_ratio <=  0.8):
+    #Rating is CC
+    credit_spread = 0.0864
+  if (interest_coverage_ratio > 0.2) & (interest_coverage_ratio <=  0.65):
+    #Rating is C
+    credit_spread = 0.1134
+  if interest_coverage_ratio <=  0.2:
+    #Rating is D
+    credit_spread = 0.1512
+  
+  cost_of_debt = RF + credit_spread
+  return cost_of_debt
+
+
+def costofequity(company):
+  #RF
+  start = datetime.datetime(2019, 7, 10)
+  end= datetime.datetime.today().strftime('%Y-%m-%d')
+
+  Treasury = web.DataReader(['TB1YR'], 'fred', start, end)
+  RF = float(Treasury.iloc[-1])
+  RF = RF/100
+
+  beta = requests.get(f'https://financialmodelingprep.com/api/v3/company/profile/{company}?apikey={demo}')
+  beta = beta.json()
+  beta = float(beta['profile']['beta'])
+
+  #Market Return
+  start = datetime.datetime(2019, 7, 10)
+  end= datetime.datetime.today().strftime('%Y-%m-%d')
+
+  SP500 = web.DataReader(['sp500'], 'fred', start, end)
+      #Drop all Not a number values using drop method.
+  SP500.dropna(inplace = True)
+
+  SP500yearlyreturn = (SP500['sp500'].iloc[-1]/ SP500['sp500'].iloc[-252])-1
+    
+  cost_of_equity = RF+(beta*(SP500yearlyreturn - RF))
+  return cost_of_equity
+
+#effective tax rate and capital structure
+def wacc(company):
+  FR = requests.get(f'https://financialmodelingprep.com/api/v3/ratios/{company}?apikey={demo}').json()
+
+  ETR = FR[0]['effectiveTaxRate']
+
+  BS = requests.get(f'https://financialmodelingprep.com/api/v3/balance-sheet-statement/{company}?period=quarter&apikey={demo}').json()
+
+  Debt_to = BS[0]['totalDebt'] / (BS[0]['totalDebt'] + BS[0]['totalStockholdersEquity'])
+  equity_to = BS[0]['totalStockholdersEquity'] / (BS[0]['totalDebt'] + BS[0]['totalStockholdersEquity'])
+
+  WACC = (kd*(1-ETR)*Debt_to) + (ke*equity_to)
+  return WACC
+
+RF_and_IntCov = interest_coveraga_and_RF(company)
+RF = RF_and_IntCov[0]
+interest_coverage_ratio = RF_and_IntCov[1]
+ke = costofequity(company)
+kd = cost_of_debt(company,RF,interest_coverage_ratio)
+wacc_company = wacc(company)
+
+print('WACC of ' + company + ' is ' + str((wacc_company*100))+'%')
+
+FCF_List = CF_forec.iloc[-1].values.tolist()
+npv = np.npv(wacc_company,FCF_List)
+
+LTGrowth = 0.03
+
+Terminal_value = (CF_forecast['next_5_year']['FCF'] * (1+ LTGrowth)) /(wacc_company  - LTGrowth)
+
+Terminal_value_Discounted = Terminal_value/(1+wacc_company)**4
+
+target_equity_value = Terminal_value_Discounted + npv
+debt = balance_sheet['current_year']['totalDebt']
+target_value = target_equity_value - debt
+numbre_of_shares = requests.get(f'https://financialmodelingprep.com/api/v3/enterprise-values/{company}?apikey={demo}').json()
+numbre_of_shares = numbre_of_shares[0]['numberOfShares']
+
+target_price_per_share = target_value / numbre_of_shares
+
+print('')
+print(company + ' Forecasted price per stock is ' + str(target_price_per_share) )
+print('')
+
+print('___________________________________________________________')
+print('')
+print('The forecast is based on the following assumptions: ')
+print('1. Revenue growth: ' + str(revenue_g))
+print('2. Cost of Capital [ WACC ]: ' + str(wacc_company))
+print('3. Perpetuity Growth: ' + str(LTGrowth))
+print('___________________________________________________________')
+print()
+
+print('Find us @ - https://github.com/sachin-duhan26/DISCOUNTED_CASH_FLOW_MODEL')
+print('thank you!')
+print('')

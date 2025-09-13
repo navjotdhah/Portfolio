@@ -1,156 +1,133 @@
 import streamlit as st
 import requests
-import numpy as np
 import pandas as pd
+import numpy as np
 import datetime
 
-st.title("DCF Forecast & WACC Calculator")
+st.set_page_config(page_title="Equity Analysis Tool", layout="wide")
 
-# -------------------------------
-# User Inputs
-# -------------------------------
-company = st.text_input("Enter Company Ticker", "GOOG")
 demo = 'a50f972afe6637de4b75c22b25793300'
 
 # -------------------------------
-# Fetch Financial Data
+# Sidebar
+# -------------------------------
+st.sidebar.title("Navigation")
+option = st.sidebar.selectbox("Choose Analysis Type", ["LBO", "DCF", "Comparables"])
+
+company = st.sidebar.text_input("Enter Company Ticker", "GOOG")
+
+# -------------------------------
+# Cached API Functions
 # -------------------------------
 @st.cache_data
-def get_income_statement(company):
-    url = f'https://financialmodelingprep.com/api/v3/income-statement/{company}?apikey={demo}'
+def get_company_profile(ticker):
+    url = f'https://financialmodelingprep.com/api/v3/company/profile/{ticker}?apikey={demo}'
     return requests.get(url).json()
 
 @st.cache_data
-def get_balance_sheet(company):
-    url = f'https://financialmodelingprep.com/api/v3/balance-sheet-statement/{company}?apikey={demo}'
+def get_income_statement(ticker):
+    url = f'https://financialmodelingprep.com/api/v3/income-statement/{ticker}?apikey={demo}'
     return requests.get(url).json()
 
 @st.cache_data
-def get_company_profile(company):
-    url = f'https://financialmodelingprep.com/api/v3/company/profile/{company}?apikey={demo}'
+def get_balance_sheet(ticker):
+    url = f'https://financialmodelingprep.com/api/v3/balance-sheet-statement/{ticker}?apikey={demo}'
     return requests.get(url).json()
 
+@st.cache_data
+def get_enterprise_values(ticker):
+    url = f'https://financialmodelingprep.com/api/v3/enterprise-values/{ticker}?apikey={demo}'
+    return requests.get(url).json()
+
+# -------------------------------
+# Fetch Data
+# -------------------------------
+profile = get_company_profile(company)
 IS = get_income_statement(company)
 BS = get_balance_sheet(company)
-profile = get_company_profile(company)
+EV = get_enterprise_values(company)
 
 # -------------------------------
-# Revenue Growth
+# LBO Section
 # -------------------------------
-revenue_g = (IS[0]['revenue'] - IS[1]['revenue']) / IS[1]['revenue']
-st.write(f"Revenue Growth: {revenue_g:.2%}")
+if option == "LBO":
+    st.header("Leveraged Buyout (LBO) Analysis")
 
-# -------------------------------
-# Forecast Income Statement
-# -------------------------------
-income_statement = pd.DataFrame.from_dict(IS[0], orient='index')
-income_statement = income_statement.apply(pd.to_numeric, errors='coerce')  # Convert all numeric
-# Keep only numeric rows for forecasting
-numeric_rows = ['revenue', 'costOfRevenue', 'grossProfit', 'ebitda', 'depreciationAndAmortization', 'netIncome']
-income_statement = income_statement.loc[numeric_rows]
-income_statement.columns = ['current_year']
+    st.subheader("Inputs")
+    purchase_price = st.number_input("Purchase Price ($M)", value=1000.0)
+    debt_equity_ratio = st.slider("Debt/Equity Ratio", 0.0, 1.0, 0.6)
+    interest_rate = st.number_input("Interest Rate on Debt (%)", value=6.0)/100
+    exit_multiple = st.number_input("Exit EBITDA Multiple", value=8.0)
+    forecast_years = st.slider("Forecast Years", 3, 10, 5)
 
-# Create percentage of revenue
-income_statement['as_%_of_revenue'] = income_statement / income_statement.loc['revenue', 'current_year']
+    # Optionally pull EBITDA from API
+    EBITDA = IS[0]['ebitda'] if 'ebitda' in IS[0] else 100
 
-# Forecast next 5 years
-for i in range(1, 6):
-    col_prev = 'current_year' if i == 1 else f'next_{i-1}_year'
-    income_statement[f'next_{i}_year'] = (income_statement.loc['revenue', col_prev] * (1 + revenue_g)) * income_statement['as_%_of_revenue']
+    st.write(f"Company EBITDA: ${EBITDA:,.0f}M")
 
-st.write("Forecasted Income Statement:")
-st.dataframe(income_statement)
+    # Debt / Equity split
+    debt = purchase_price * debt_equity_ratio
+    equity = purchase_price - debt
 
-# -------------------------------
-# Forecast Balance Sheet
-# -------------------------------
-balance_sheet = pd.DataFrame.from_dict(BS[0], orient='index')
-balance_sheet = balance_sheet.apply(pd.to_numeric, errors='coerce')
-bs_numeric_rows = ['totalDebt','totalStockholdersEquity','netReceivables','inventory','accountPayables','propertyPlantEquipmentNet']
-balance_sheet = balance_sheet.loc[bs_numeric_rows]
-balance_sheet.columns = ['current_year']
+    st.write(f"Debt: ${debt:,.0f}M | Equity: ${equity:,.0f}M")
 
-# Percentage of revenue
-balance_sheet['as_%_of_revenue'] = balance_sheet / income_statement.loc['revenue', 'current_year']
+    # Forecast cash flows
+    growth_rate = st.number_input("EBITDA Growth Rate (%)", value=5.0)/100
+    CF = [EBITDA * (1+growth_rate)**i for i in range(1, forecast_years+1)]
+    debt_balance = debt
+    for i, cf in enumerate(CF):
+        debt_payment = min(cf*0.8, debt_balance)  # simple debt paydown assumption
+        debt_balance -= debt_payment
+        CF[i] -= debt_payment
 
-# Forecast next 5 years
-for i in range(1, 6):
-    col_prev = 'current_year' if i == 1 else f'next_{i-1}_year'
-    rev_col = f'next_{i}_year'
-    balance_sheet[f'next_{i}_year'] = income_statement.loc['revenue', rev_col] * balance_sheet['as_%_of_revenue']
+    exit_value = CF[-1] * exit_multiple / EBITDA * EBITDA
+    equity_exit = exit_value - debt_balance
 
-st.write("Forecasted Balance Sheet:")
-st.dataframe(balance_sheet)
+    st.subheader("Outputs")
+    st.write(f"Equity Value at Exit: ${equity_exit:,.0f}M")
+    st.write(f"Estimated IRR (Simplified): {((equity_exit / equity)**(1/forecast_years)-1)*100:.2f}%")
 
 # -------------------------------
-# Forecast Cash Flows
+# DCF Section
 # -------------------------------
-CF_forecast = {}
-for i in range(1, 6):
-    year_key = f'next_{i}_year'
-    prev_key = 'current_year' if i == 1 else f'next_{i-1}_year'
+elif option == "DCF":
+    st.header("Discounted Cash Flow (DCF) Analysis")
 
-    CF_forecast[year_key] = {}
-    # Safely access with .at and check for missing rows
-    CF_forecast[year_key]['netIncome'] = income_statement.at['netIncome', year_key]
-    CF_forecast[year_key]['inc_depreciation'] = income_statement.at['depreciationAndAmortization', year_key] - income_statement.at['depreciationAndAmortization', prev_key]
-    CF_forecast[year_key]['inc_receivables'] = balance_sheet.at['netReceivables', year_key] - balance_sheet.at['netReceivables', prev_key]
-    CF_forecast[year_key]['inc_inventory'] = balance_sheet.at['inventory', year_key] - balance_sheet.at['inventory', prev_key]
-    CF_forecast[year_key]['inc_payables'] = balance_sheet.at['accountPayables', year_key] - balance_sheet.at['accountPayables', prev_key]
-    CF_forecast[year_key]['CF_operations'] = (
-        CF_forecast[year_key]['netIncome'] +
-        CF_forecast[year_key]['inc_depreciation'] -
-        CF_forecast[year_key]['inc_receivables'] -
-        CF_forecast[year_key]['inc_inventory'] +
-        CF_forecast[year_key]['inc_payables']
-    )
-    CF_forecast[year_key]['CAPEX'] = balance_sheet.at['propertyPlantEquipmentNet', year_key] - balance_sheet.at['propertyPlantEquipmentNet', prev_key] + income_statement.at['depreciationAndAmortization', year_key]
-    CF_forecast[year_key]['FCF'] = CF_forecast[year_key]['CF_operations'] + CF_forecast[year_key]['CAPEX']
+    st.subheader("Inputs")
+    revenue = IS[0]['revenue'] if 'revenue' in IS[0] else 1000
+    rev_growth = st.number_input("Revenue Growth Rate (%)", value=5.0)/100
+    wacc = st.number_input("WACC (%)", value=8.0)/100
+    terminal_growth = st.number_input("Terminal Growth (%)", value=3.0)/100
+    forecast_years = st.slider("Forecast Years", 3, 10, 5)
 
-CF_forec = pd.DataFrame.from_dict(CF_forecast, orient='columns')
-pd.options.display.float_format = '{:,.0f}'.format
-st.write("Forecasted Cash Flows:")
-st.dataframe(CF_forec)
+    # Forecast Free Cash Flows
+    FCF = [revenue*(1+rev_growth)**i * 0.15 for i in range(1, forecast_years+1)]  # simple 15% FCF margin
+    PV_FCF = [fcf/(1+wacc)**i for i, fcf in enumerate(FCF, start=1)]
+    terminal_value = FCF[-1]*(1+terminal_growth)/(wacc-terminal_growth)
+    PV_terminal = terminal_value/(1+wacc)**forecast_years
+    enterprise_value = sum(PV_FCF) + PV_terminal
+    st.write(f"Estimated Enterprise Value: ${enterprise_value:,.0f}M")
 
 # -------------------------------
-# Cost of Equity & Debt
+# Comparables Section
 # -------------------------------
-RF = 0.05  # Simplified, you can replace with FRED call
-beta = float(profile['profile']['beta'])
-market_return = 0.10
-ke = RF + beta * (market_return - RF)
+elif option == "Comparables":
+    st.header("Comparable Company Analysis")
 
-interest_expense = IS[0]['interestExpense']
-EBIT = IS[0]['ebitda'] - IS[0]['depreciationAndAmortization']
-interest_coverage_ratio = EBIT / interest_expense
+    st.subheader("Inputs")
+    competitor_list = st.text_area("Enter Competitor Tickers (comma separated) or leave blank for auto-fetch")
+    competitors = [c.strip() for c in competitor_list.split(",") if c.strip()]
 
-def get_credit_spread(icr):
-    if icr > 8.5: return 0.0063
-    elif icr > 6.5: return 0.0078
-    elif icr > 5.5: return 0.0098
-    elif icr > 4.25: return 0.0108
-    elif icr > 3: return 0.0122
-    elif icr > 2.5: return 0.0156
-    elif icr > 2.25: return 0.02
-    elif icr > 2: return 0.0240
-    elif icr > 1.75: return 0.0351
-    elif icr > 1.5: return 0.0421
-    elif icr > 1.25: return 0.0515
-    elif icr > 0.8: return 0.0820
-    elif icr > 0.65: return 0.0864
-    elif icr > 0.2: return 0.1134
-    else: return 0.1512
+    if not competitors:
+        # TODO: auto-fetch competitors from FMP (placeholder)
+        competitors = ["AAPL", "MSFT", "AMZN"]  
 
-credit_spread = get_credit_spread(interest_coverage_ratio)
-kd = RF + credit_spread
+    comp_data = []
+    for comp in competitors:
+        comp_profile = get_company_profile(comp)
+        market_cap = comp_profile['profile'].get('mktCap', 0)
+        comp_data.append({'Ticker': comp, 'Market Cap': market_cap})
 
-# -------------------------------
-# WACC
-# -------------------------------
-total_debt = BS[0]['totalDebt']
-total_equity = BS[0]['totalStockholdersEquity']
-ETR = 0.21
-Debt_to = total_debt / (total_debt + total_equity)
-Equity_to = total_equity / (total_debt + total_equity)
-wacc_company = (kd*(1-ETR)*Debt_to) + (ke*Equity_to)
-st.write(f"WACC: {wacc_company:.2%}")
+    df_comp = pd.DataFrame(comp_data)
+    st.write("Comparable Companies:")
+    st.dataframe(df_comp)

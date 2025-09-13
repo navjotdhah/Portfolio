@@ -274,6 +274,6 @@ print('3. Perpetuity Growth: ' + str(LTGrowth))
 print('___________________________________________________________')
 print()
 
-print('Find us @ - https://github.com/sachin-duhan26/DISCOUNTED_CASH_FLOW_MODEL')
+print('Find me @ - www.linkedin.com/in/navjot-dhah-57870b238')
 print('thank you!')
 print('')

@@ -45,24 +45,30 @@ st.write(f"Revenue Growth: {revenue_g:.2%}")
 # -------------------------------
 income_statement = pd.DataFrame.from_dict(IS[0], orient='index')[5:26]
 income_statement.columns = ['current_year']
-income_statement['as_%_of_revenue'] = income_statement / income_statement.iloc[0]
+
+# Convert all numeric values, coerce errors to NaN
+income_statement = income_statement.apply(pd.to_numeric, errors='coerce')
+
+# Divide by revenue (first row only)
+income_statement['as_%_of_revenue'] = income_statement / income_statement.loc['revenue', 'current_year']
 
 # Forecast next 5 years
 for i in range(1, 6):
     col_prev = 'current_year' if i == 1 else f'next_{i-1}_year'
-    income_statement[f'next_{i}_year'] = (income_statement[col_prev]['revenue'] * (1+revenue_g)) * income_statement['as_%_of_revenue']
+    income_statement[f'next_{i}_year'] = (income_statement.loc['revenue', col_prev] * (1 + revenue_g)) * income_statement['as_%_of_revenue']
 
 # -------------------------------
 # Forecast Balance Sheet
 # -------------------------------
 balance_sheet = pd.DataFrame.from_dict(BS[0], orient='index')[5:-2]
 balance_sheet.columns = ['current_year']
-balance_sheet['as_%_of_revenue'] = balance_sheet / income_statement['current_year'].iloc[0]
+balance_sheet = balance_sheet.apply(pd.to_numeric, errors='coerce')
+balance_sheet['as_%_of_revenue'] = balance_sheet / income_statement.loc['revenue', 'current_year']
 
 for i in range(1, 6):
     col_prev = 'current_year' if i == 1 else f'next_{i-1}_year'
     income_col = f'next_{i}_year'
-    balance_sheet[f'next_{i}_year'] = income_statement[income_col]['revenue'] * balance_sheet['as_%_of_revenue']
+    balance_sheet[f'next_{i}_year'] = income_statement.loc['revenue', income_col] * balance_sheet['as_%_of_revenue']
 
 # -------------------------------
 # Forecast Cash Flows
@@ -73,11 +79,11 @@ for i in range(1, 6):
     year_key = f'next_{i}_year'
     prev_key = 'current_year' if i == 1 else f'next_{i-1}_year'
     CF_forecast[year_key] = {}
-    CF_forecast[year_key]['netIncome'] = income_statement[year_key]['netIncome']
-    CF_forecast[year_key]['inc_depreciation'] = income_statement[year_key]['depreciationAndAmortization'] - income_statement[prev_key]['depreciationAndAmortization']
-    CF_forecast[year_key]['inc_receivables'] = balance_sheet[year_key]['netReceivables'] - balance_sheet[prev_key]['netReceivables']
-    CF_forecast[year_key]['inc_inventory'] = balance_sheet[year_key]['inventory'] - balance_sheet[prev_key]['inventory']
-    CF_forecast[year_key]['inc_payables'] = balance_sheet[year_key]['accountPayables'] - balance_sheet[prev_key]['accountPayables']
+    CF_forecast[year_key]['netIncome'] = income_statement.loc['netIncome', year_key]
+    CF_forecast[year_key]['inc_depreciation'] = income_statement.loc['depreciationAndAmortization', year_key] - income_statement.loc['depreciationAndAmortization', prev_key]
+    CF_forecast[year_key]['inc_receivables'] = balance_sheet.loc['netReceivables', year_key] - balance_sheet.loc['netReceivables', prev_key]
+    CF_forecast[year_key]['inc_inventory'] = balance_sheet.loc['inventory', year_key] - balance_sheet.loc['inventory', prev_key]
+    CF_forecast[year_key]['inc_payables'] = balance_sheet.loc['accountPayables', year_key] - balance_sheet.loc['accountPayables', prev_key]
     CF_forecast[year_key]['CF_operations'] = (
         CF_forecast[year_key]['netIncome'] +
         CF_forecast[year_key]['inc_depreciation'] -
@@ -85,7 +91,7 @@ for i in range(1, 6):
         CF_forecast[year_key]['inc_inventory'] +
         CF_forecast[year_key]['inc_payables']
     )
-    CF_forecast[year_key]['CAPEX'] = balance_sheet[year_key]['propertyPlantEquipmentNet'] - balance_sheet[prev_key]['propertyPlantEquipmentNet'] + income_statement[year_key]['depreciationAndAmortization']
+    CF_forecast[year_key]['CAPEX'] = balance_sheet.loc['propertyPlantEquipmentNet', year_key] - balance_sheet.loc['propertyPlantEquipmentNet', prev_key] + income_statement.loc['depreciationAndAmortization', year_key]
     CF_forecast[year_key]['FCF'] = CF_forecast[year_key]['CF_operations'] + CF_forecast[year_key]['CAPEX']
 
 CF_forec = pd.DataFrame.from_dict(CF_forecast, orient='columns')
@@ -94,7 +100,7 @@ st.write("Forecasted Cash Flows:")
 st.dataframe(CF_forec)
 
 # -------------------------------
-# Fetch Risk-Free Rate from FRED (TB1YR)
+# Risk-Free Rate (FRED)
 # -------------------------------
 @st.cache_data
 def get_rf():
@@ -109,7 +115,6 @@ RF = get_rf()
 # Cost of Equity
 # -------------------------------
 beta = float(profile['profile']['beta'])
-# Simple approximation for market return
 market_return = 0.10
 ke = RF + beta * (market_return - RF)
 
@@ -120,7 +125,6 @@ interest_expense = IS[0]['interestExpense']
 EBIT = IS[0]['ebitda'] - IS[0]['depreciationAndAmortization']
 interest_coverage_ratio = EBIT / interest_expense
 
-# Simple credit spread table
 def get_credit_spread(icr):
     if icr > 8.5: return 0.0063
     elif icr > 6.5: return 0.0078
@@ -151,19 +155,3 @@ Debt_to = total_debt / (total_debt + total_equity)
 Equity_to = total_equity / (total_debt + total_equity)
 wacc_company = (kd*(1-ETR)*Debt_to) + (ke*Equity_to)
 st.write(f"WACC: {wacc_company:.2%}")
-
-# -------------------------------
-# DCF Valuation
-# -------------------------------
-FCF_List = CF_forec.iloc[-1].values.tolist()
-npv = np.npv(wacc_company, FCF_List)
-
-LTGrowth = 0.03
-Terminal_value = (CF_forecast['next_5_year']['FCF'] * (1 + LTGrowth)) / (wacc_company - LTGrowth)
-Terminal_value_Discounted = Terminal_value / (1 + wacc_company)**5
-target_equity_value = npv + Terminal_value_Discounted
-target_value = target_equity_value - total_debt
-num_shares = profile['profile']['mktCap'] / IS[0]['eps']  # approximate
-target_price_per_share = target_value / num_shares
-
-st.write(f"Forecasted Price per Share: ${target_price_per_share:,.2f}")
